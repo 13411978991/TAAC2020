@@ -1,0 +1,74 @@
+from utils import w2v
+import pandas as pd
+from tqdm import tqdm
+import os
+from utils import process
+import torch
+from torch.nn import  functional as F
+
+
+path_train=r'data'
+path_test=''
+user=pd.read_csv(os.path.join(path_train,'user.csv'))
+dic_user={}
+for item in tqdm(user.values):
+    dic_user[item[0]]=(item[1],item[2])
+
+"""配置参数"""
+class Config(object):
+    def __init__(self):
+        self.model = 'rcnn'
+        self.class_list = [0,1]              # 类别名单
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   # 设备
+        self.dropout = 0.5                                              # 随机失活
+        self.require_improvement = 2000                                 # 若超过1000batch效果还没提升，则提前结束训练
+        self.num_classes = len(self.class_list)                         # 类别数
+        self.n_vocab = 0                                                # 词表大小，在运行时赋值
+        self.num_epochs = 10                                            # epoch数
+        self.batch_size = 8                                           # mini-batch大小
+        self.pad_size = 100                                             # 每句话处理成的长度(短填长切)
+        self.learning_rate = 5e-4                                       # 学习率
+        self.embed = 32                                                # 字向量维度
+        self.dim_model = 32                                             #transformer的维度
+        self.num_head = 4                                               #transformer头数
+        self.num_encoder = 2                                            #编码器数
+        self.hidden_size = 600                                          # lstm隐藏层大小
+        self.num_layers = 2                                             #lstm层数
+config = Config()
+
+#数据准备
+train,vocab,weight=w2v.w2v(path_train,path_test,'user_id','ad_id',config.embed)#提取需训练的数据，词向量索引及词向量文件
+df = process.df2sent(train,'ad_id',vocab,config)#输出user:[ad_id1,ad_id2,...]序列
+sentence=[]
+for key in tqdm(dic_user.keys()):
+    sentence.append((df[key],dic_user[key][1]-1))#（[ad_id1,ad_id2,...]，gender)
+train_iter = process.build_iterator(sentence, config)#定义迭代器
+weight = torch.FloatTensor(weight)#将向量文件转换为tensor
+
+#模型定义及训练
+if config.model == 'rcnn':
+    from model import rcnn
+    net = rcnn.Model(config, weight).to(config.device)
+elif config.model == 'transformer_lstm':
+    from model import transformer_lstm
+    net = transformer_lstm.Model(config, weight).to(config.device)
+
+net.train()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-4)
+#学习率指数衰减，每次epoch：学习率 = gamma * 学习率
+scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+total_batch = 0  # 记录进行到多少batch
+dev_best_loss = float('inf')
+best_acc=0
+last_improve = 0  # 记录上次验证集loss下降的batch数
+flag = False  # 记录是否很久没有效果提升
+for epoch in range(100):
+    print('Epoch [{}/{}]'.format(epoch + 1,100))
+    # scheduler.step() # 学习率衰减
+    for i, (trains, labels) in enumerate(train_iter):
+        outputs = net(trains)
+        net.zero_grad()
+        loss = F.cross_entropy(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        print('train_loss',loss,i,epoch)
